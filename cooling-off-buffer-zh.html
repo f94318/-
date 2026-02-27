@@ -1,0 +1,1235 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>安付 · 冷靜緩衝機制</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0c10;
+    --surface: #111318;
+    --surface2: #181c24;
+    --border: #22273a;
+    --accent: #00e5a0;
+    --accent2: #ff6b35;
+    --warn: #f0b429;
+    --text: #e8eaf0;
+    --muted: #5a6080;
+    --staged: #4466ff;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Noto Sans TC', sans-serif;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    overflow-x: hidden;
+  }
+
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background:
+      radial-gradient(ellipse 60% 50% at 20% 10%, rgba(0,229,160,0.06) 0%, transparent 60%),
+      radial-gradient(ellipse 50% 40% at 80% 90%, rgba(68,102,255,0.08) 0%, transparent 60%);
+    pointer-events: none;
+  }
+
+  /* ── 手機外殼 ── */
+  .phone-shell {
+    width: 390px; max-width: 100%;
+    background: var(--surface);
+    border-radius: 44px;
+    border: 1px solid var(--border);
+    overflow: hidden;
+    box-shadow: 0 40px 100px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.04);
+    position: relative;
+  }
+
+  /* ── 狀態欄 ── */
+  .status-bar {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 28px 0;
+    font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted);
+  }
+
+  /* ── 畫面 ── */
+  .screen { display: none; padding: 0 0 36px; }
+  .screen.active { display: block; animation: fadeIn 0.3s ease; }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── 進度步驟條 ── */
+  .step-bar {
+    display: flex; align-items: center; justify-content: center;
+    gap: 0; padding: 18px 28px 0;
+  }
+  .step-item {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    flex: 1;
+  }
+  .step-circle {
+    width: 28px; height: 28px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 900;
+    background: var(--surface2); border: 1.5px solid var(--border); color: var(--muted);
+    transition: all 0.3s;
+  }
+  .step-circle.done  { background: rgba(0,229,160,0.15); border-color: var(--accent); color: var(--accent); }
+  .step-circle.active{ background: var(--accent); border-color: var(--accent); color: #000; }
+  .step-label { font-size: 9px; color: var(--muted); letter-spacing: 0.5px; transition: color 0.3s; }
+  .step-label.active { color: var(--accent); }
+  .step-label.done   { color: var(--muted); }
+  .step-line {
+    flex: 1; height: 1.5px; background: var(--border);
+    margin: 0 4px; margin-bottom: 18px; /* align to circle center */
+    transition: background 0.3s;
+    max-width: 40px;
+  }
+  .step-line.done { background: var(--accent); }
+
+  /* ── 頁首（含返回） ── */
+  .screen-header {
+    padding: 16px 28px 0;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .back-btn {
+    width: 36px; height: 36px;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 12px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.2s; font-size: 16px; flex-shrink: 0;
+  }
+  .back-btn:hover { background: var(--border); }
+  .screen-title { font-size: 17px; font-weight: 900; letter-spacing: 0.5px; }
+
+  /* ── 表單欄位 ── */
+  .form-section { padding: 24px 28px 0; }
+  .form-title { font-size: 22px; font-weight: 900; letter-spacing: -0.3px; line-height: 1.3; }
+  .form-sub   { font-size: 13px; color: var(--muted); margin-top: 6px; line-height: 1.6; }
+
+  .field-block { margin-top: 24px; }
+  .field-label-row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 8px;
+  }
+  .field-label { font-size: 11px; color: var(--accent); font-weight: 700; letter-spacing: 0.8px; }
+  .field-meta  { font-size: 10px; color: var(--muted); }
+
+  /* 偽佔位符輸入框（灰色0底） */
+  .digit-input-wrap {
+    position: relative;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 14px 16px;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    cursor: text;
+  }
+  .digit-input-wrap:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(0,229,160,0.1);
+  }
+  /* Character-grid digit display */
+  .digit-display {
+    font-family: 'Space Mono', monospace;
+    font-size: 18px; letter-spacing: 3px;
+    display: block; white-space: nowrap; overflow: hidden;
+    line-height: 1.4; pointer-events: none; user-select: none;
+    min-height: 1.4em;
+  }
+  .digit-display .dc { color: var(--text); }        /* typed digit */
+  .digit-display .dp { color: var(--border); }      /* placeholder 0 */
+  /* Hidden real input — captures typing but is invisible */
+  .digit-real-hidden {
+    position: absolute; inset: 0; padding: 14px 16px;
+    font-family: 'Space Mono', monospace;
+    font-size: 18px; letter-spacing: 3px;
+    color: transparent; background: transparent;
+    border: none; outline: none; width: 100%;
+    caret-color: var(--accent);
+    -webkit-text-fill-color: transparent;
+  }
+  .field-hint  { font-size: 10px; color: var(--muted); margin-top: 6px; }
+  .field-error { font-size: 11px; color: var(--accent2); margin-top: 6px; min-height: 14px; }
+
+  /* ── 金額輸入 ── */
+  .amount-hero { padding: 28px 28px 0; text-align: center; }
+  .amount-label-sm { font-size: 11px; color: var(--muted); letter-spacing: 1px; margin-bottom: 10px; }
+  .amount-row {
+    display: flex; align-items: center; justify-content: center; gap: 4px;
+  }
+  .currency-sign { font-size: 32px; font-weight: 900; color: var(--accent); line-height:1; padding-bottom:4px; }
+  .amount-input {
+    background: transparent; border: none; outline: none;
+    font-family: 'Noto Sans TC', sans-serif;
+    font-size: 52px; font-weight: 900; color: var(--text);
+    letter-spacing: -3px; width: 220px; text-align: left;
+    caret-color: var(--accent);
+  }
+  .amount-input::placeholder { color: var(--border); }
+  .amount-underline {
+    height: 2px;
+    background: linear-gradient(90deg, var(--accent), var(--staged));
+    border-radius: 2px; margin: 4px auto 0; width: 260px;
+    opacity: 0.5; transition: opacity 0.2s;
+  }
+  .amount-hint  { font-size: 11px; color: var(--muted); margin-top: 8px; }
+  .amount-error { font-size: 11px; color: var(--accent2); margin-top: 6px; min-height: 16px; }
+  .cooling-preview { font-size: 12px; font-weight: 700; margin-top: 4px; min-height: 18px; transition: color 0.3s; }
+
+  /* ── 收款人摘要卡片（金額頁） ── */
+  .recipient-summary {
+    margin: 18px 28px 0;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 18px; padding: 14px 16px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .rs-avatar {
+    width: 40px; height: 40px;
+    background: linear-gradient(135deg, #4466ff, #00e5a0);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; flex-shrink: 0;
+  }
+  .rs-info { flex: 1; }
+  .rs-info .rs-name { font-size: 13px; font-weight: 700; }
+  .rs-info .rs-acct { font-size: 11px; color: var(--muted); font-family: 'Space Mono', monospace; margin-top: 2px; }
+
+  /* ── BSP 警示 ── */
+  .bsp-alert {
+    margin: 14px 28px 0;
+    background: rgba(240,180,41,0.1); border: 1px solid rgba(240,180,41,0.25);
+    border-radius: 14px; padding: 12px 14px;
+    display: flex; align-items: flex-start; gap: 10px;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,100% { border-color: rgba(240,180,41,0.25); }
+    50%      { border-color: rgba(240,180,41,0.5); }
+  }
+  .bsp-alert .icon { font-size: 16px; flex-shrink:0; margin-top:1px; }
+  .bsp-alert p { font-size: 12px; color: var(--warn); line-height: 1.6; }
+  .bsp-alert strong { font-weight: 700; }
+
+  /* ── 按鈕 ── */
+  .primary-btn {
+    display: block; margin: 20px 28px 0;
+    background: var(--accent); color: #000; border: none;
+    border-radius: 18px; padding: 18px;
+    font-family: 'Noto Sans TC', sans-serif; font-size: 15px; font-weight: 900;
+    cursor: pointer; width: calc(100% - 56px);
+    transition: transform 0.15s, box-shadow 0.15s, opacity 0.2s;
+    box-shadow: 0 8px 30px rgba(0,229,160,0.3);
+  }
+  .primary-btn:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 12px 40px rgba(0,229,160,0.4); }
+  .primary-btn:active  { transform: translateY(0); }
+  .primary-btn:disabled{ opacity: 0.35; cursor: not-allowed; }
+
+  .secondary-btn {
+    display: block; margin: 12px 28px 0;
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 18px; padding: 16px;
+    font-family: 'Noto Sans TC', sans-serif; font-size: 14px; font-weight: 500;
+    cursor: pointer; width: calc(100% - 56px);
+    transition: background 0.2s, color 0.2s; text-align: center;
+  }
+  .secondary-btn:hover { background: var(--surface2); color: var(--text); }
+
+  /* ══════════════════════════════════
+     冷靜緩衝：內嵌於轉帳頁
+  ══════════════════════════════════ */
+
+  /* 緩衝覆蓋層（滑入替換轉帳頁內容） */
+  .buffer-overlay {
+    display: none;
+    padding: 0 0 32px;
+    animation: fadeIn 0.4s ease;
+  }
+  .buffer-overlay.active { display: block; }
+
+  .staged-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(68,102,255,0.15); border: 1px solid rgba(68,102,255,0.3);
+    border-radius: 8px; padding: 5px 12px;
+    font-size: 11px; font-weight: 700; color: var(--staged);
+    margin: 16px 28px 0;
+  }
+  .staged-dot {
+    width:6px; height:6px; background:var(--staged); border-radius:50%;
+    animation: blink 1.2s ease infinite; flex-shrink:0;
+  }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+  .cooling-reason-badge {
+    display: flex; align-items: center; gap: 6px;
+    background: rgba(240,180,41,0.08); border: 1px solid rgba(240,180,41,0.2);
+    border-radius: 8px; padding: 5px 12px;
+    font-size: 11px; font-weight: 700; color: var(--warn);
+    margin: 8px 28px 0;
+  }
+
+  .buffer-hero { padding: 22px 28px 0; text-align: center; }
+  .shield-ring { width: 140px; height: 140px; margin: 0 auto; position: relative; }
+  .ring-svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .ring-bg { fill: none; stroke: var(--surface2); stroke-width: 8; }
+  .ring-progress {
+    fill: none; stroke: var(--accent); stroke-width: 8;
+    stroke-linecap: round; stroke-dasharray: 345; stroke-dashoffset: 0;
+    transition: stroke-dashoffset 1s linear, stroke 0.5s;
+  }
+  .shield-inner {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+  }
+  .shield-icon { font-size: 26px; }
+  .timer-text {
+    font-family: 'Space Mono', monospace;
+    font-size: 22px; font-weight: 700; color: var(--accent);
+    letter-spacing: -1px; line-height: 1; margin-top: 2px;
+  }
+  .timer-label { font-size: 9px; color: var(--muted); letter-spacing: 1px; margin-top: 2px; }
+  .buffer-title { font-size: 20px; font-weight: 900; margin-top: 18px; line-height: 1.3; }
+  .buffer-subtitle { font-size: 13px; color: var(--muted); margin-top: 8px; line-height: 1.7; }
+  .staged-amount-row {
+    display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 10px;
+  }
+  .staged-amount-value { font-size: 28px; font-weight: 900; color: var(--accent); letter-spacing: -1px; }
+
+  /* ── 狀態格 ── */
+  .status-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 16px 28px 0;
+  }
+  .status-pill {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 16px; padding: 14px; text-align: center;
+  }
+  .status-pill .pill-icon  { font-size: 20px; }
+  .status-pill .pill-label { font-size: 10px; color: var(--muted); margin-top: 4px; }
+  .status-pill .pill-value { font-size: 12px; font-weight: 700; margin-top: 2px; color: var(--accent); }
+  .status-pill.warn .pill-value { color: var(--warn); }
+
+  /* ── BSP 指標 ── */
+  .bsp-indicator {
+    margin: 12px 28px 0;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 16px; padding: 14px 16px;
+  }
+  .bsp-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .bsp-label-txt { font-size: 11px; color: var(--muted); }
+  .bsp-level-txt { font-size: 11px; font-weight: 700; color: var(--accent); transition: color 0.5s; }
+  .bsp-bar-bg { background: var(--border); border-radius: 4px; height: 6px; }
+  .bsp-bar-fill {
+    background: linear-gradient(90deg, var(--accent), var(--staged));
+    border-radius: 4px; height: 6px; width: 22%;
+    transition: width 2s ease, background 1.5s ease;
+  }
+  .bsp-triggers { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .bsp-tag {
+    background: rgba(0,229,160,0.08); border: 1px solid rgba(0,229,160,0.2);
+    color: var(--accent); border-radius: 6px; padding: 3px 8px;
+    font-size: 10px; font-weight: 700;
+    transition: background 0.4s, border-color 0.4s, color 0.4s;
+  }
+  .bsp-tag.elevated { background: rgba(240,180,41,0.12); border-color: rgba(240,180,41,0.3); color: var(--warn); }
+
+  .withdraw-btn {
+    display: block; margin: 14px 28px 0;
+    background: rgba(0,229,160,0.1); color: var(--accent);
+    border: 1px solid rgba(0,229,160,0.3); border-radius: 18px; padding: 18px;
+    font-family: 'Noto Sans TC', sans-serif; font-size: 15px; font-weight: 700;
+    cursor: pointer; width: calc(100% - 56px); transition: all 0.2s; text-align: center;
+  }
+  .withdraw-btn:hover { background: rgba(0,229,160,0.2); border-color: rgba(0,229,160,0.5); }
+
+  /* ── 豁免路徑 ── */
+  .exemption-section { padding: 20px 28px 0; }
+  .section-label { font-size: 10px; color: var(--muted); letter-spacing: 1.5px; margin-bottom: 12px; }
+  .exemption-option {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 18px; padding: 16px;
+    display: flex; align-items: center; gap: 14px;
+    margin-bottom: 10px; cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+  }
+  .exemption-option:hover { border-color: var(--accent); background: rgba(0,229,160,0.04); }
+  .option-icon-wrap {
+    width: 46px; height: 46px; border-radius: 14px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px; flex-shrink: 0;
+  }
+  .opt-green  { background: rgba(0,229,160,0.15); }
+  .opt-blue   { background: rgba(68,102,255,0.15); }
+  .opt-orange { background: rgba(255,107,53,0.15); }
+  .option-text h4 { font-size: 14px; font-weight: 700; }
+  .option-text p  { font-size: 11px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
+  .option-arrow   { margin-left: auto; color: var(--muted); font-size: 18px; flex-shrink: 0; }
+
+  /* ── 白名單展開面板 ── */
+  .whitelist-panel {
+    display: none;
+    background: rgba(0,229,160,0.04); border: 1px solid rgba(0,229,160,0.2);
+    border-radius: 16px; padding: 18px; margin: -4px 0 10px;
+    animation: fadeIn 0.25s ease;
+  }
+  .whitelist-panel.open { display: block; }
+  .wl-field-group { margin-bottom: 14px; }
+  .wl-field-label {
+    font-size: 10px; color: var(--accent); font-weight: 700;
+    letter-spacing: 0.8px; margin-bottom: 6px; display: block;
+  }
+  .wl-field-input {
+    width: 100%;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 12px; padding: 12px 14px;
+    font-family: 'Space Mono', monospace;
+    font-size: 14px; color: var(--text); outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s; letter-spacing: 2px;
+  }
+  .wl-field-input::placeholder { color: var(--muted); letter-spacing: 0; font-size: 12px; font-family: 'Noto Sans TC', sans-serif; }
+  .wl-field-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0,229,160,0.1); }
+  .wl-field-hint  { font-size: 10px; color: var(--muted); margin-top: 5px; }
+  .panel-submit-btn {
+    width: 100%; background: var(--accent); color: #000;
+    border: none; border-radius: 12px; padding: 13px;
+    font-family: 'Noto Sans TC', sans-serif; font-size: 14px; font-weight: 900;
+    cursor: pointer; transition: opacity 0.2s, transform 0.15s;
+  }
+  .panel-submit-btn:hover { opacity: 0.88; transform: translateY(-1px); }
+  .panel-error { font-size: 11px; color: var(--accent2); margin-bottom: 10px; min-height: 14px; }
+
+  /* ── QR 掃描 ── */
+  .qr-section { padding: 24px 28px 0; text-align: center; }
+  .qr-frame {
+    width: 200px; height: 200px; margin: 0 auto 20px;
+    border: 2px solid var(--accent); border-radius: 24px;
+    position: relative; display: flex; align-items: center; justify-content: center;
+    background: var(--surface2); overflow: hidden;
+  }
+  .qr-corner { position: absolute; width: 24px; height: 24px; border-color: var(--accent); border-style: solid; border-width: 0; }
+  .qr-corner.tl { top:10px;    left:10px;  border-top-width:3px;    border-left-width:3px;  border-top-left-radius:6px; }
+  .qr-corner.tr { top:10px;    right:10px; border-top-width:3px;    border-right-width:3px; border-top-right-radius:6px; }
+  .qr-corner.bl { bottom:10px; left:10px;  border-bottom-width:3px; border-left-width:3px;  border-bottom-left-radius:6px; }
+  .qr-corner.br { bottom:10px; right:10px; border-bottom-width:3px; border-right-width:3px; border-bottom-right-radius:6px; }
+  .scan-line {
+    position: absolute; left:14px; right:14px; height:2px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    top:14px; animation: scan 2.5s ease-in-out infinite;
+    box-shadow: 0 0 12px var(--accent);
+  }
+  @keyframes scan { 0%{top:14px} 50%{top:calc(100% - 16px)} 100%{top:14px} }
+  .qr-icon { font-size: 44px; opacity: 0.2; }
+  .qr-info { font-size: 13px; color: var(--muted); line-height: 1.6; margin-top: 4px; }
+
+  /* ── 取款確認 ── */
+  .withdraw-screen { padding: 28px 28px 0; text-align: center; }
+  .big-icon { font-size: 64px; margin-bottom: 16px; }
+  .confirm-title { font-size: 22px; font-weight: 900; letter-spacing: 0.3px; }
+  .confirm-sub { font-size: 13px; color: var(--muted); margin-top: 8px; line-height: 1.6; max-width: 280px; margin-left:auto; margin-right:auto; }
+  .amount-confirm {
+    margin: 20px 0; background: var(--surface2); border: 1px solid var(--border); border-radius: 20px; padding: 20px;
+  }
+  .amount-confirm .label { font-size: 11px; color: var(--muted); letter-spacing: 0.5px; }
+  .amount-confirm .value { font-size: 36px; font-weight: 900; letter-spacing: -2px; color: var(--accent); margin-top: 4px; }
+  .danger-btn {
+    display: block; margin: 0 0 12px;
+    background: rgba(255,107,53,0.15); color: var(--accent2);
+    border: 1px solid rgba(255,107,53,0.3); border-radius: 18px; padding: 18px;
+    font-family: 'Noto Sans TC', sans-serif; font-size: 15px; font-weight: 700;
+    cursor: pointer; width: 100%; transition: all 0.2s; text-align: center;
+  }
+  .danger-btn:hover { background: rgba(255,107,53,0.25); }
+
+  /* ── 成功動畫 ── */
+  .success-anim { animation: successPop 0.5s cubic-bezier(0.34,1.56,0.64,1); }
+  @keyframes successPop { from{transform:scale(0.5);opacity:0} to{transform:scale(1);opacity:1} }
+
+  /* ── 雜項 ── */
+  .divider { height:1px; background:var(--border); margin:16px 28px 0; }
+  .row-between { display:flex; justify-content:space-between; align-items:center; }
+
+  /* ── 導覽標籤（無「緩衝中」） ── */
+  .nav-tabs { display:flex; padding:14px 28px 0; gap:8px; flex-wrap:wrap; }
+  .nav-tab {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 6px 12px;
+    font-size: 11px; font-weight: 700; color: var(--muted);
+    cursor: pointer; transition: all 0.2s; font-family: 'Noto Sans TC', sans-serif;
+  }
+  .nav-tab.active { background: var(--accent); color: #000; border-color: var(--accent); }
+  .nav-tab:hover:not(.active) { border-color: var(--accent); color: var(--accent); }
+</style>
+</head>
+<body>
+
+<div class="phone-shell">
+
+  <!-- 狀態欄 -->
+  <div class="status-bar">
+    <span>9:41</span>
+    <span>安付 SafePay</span>
+    <span>●●● 100%</span>
+  </div>
+
+  <!-- 導覽標籤（僅三頁，無「緩衝中」） -->
+  <div class="nav-tabs">
+    <div class="nav-tab active" onclick="navTo('bank')">轉帳</div>
+    <div class="nav-tab" onclick="navTo('exemption')">豁免路徑</div>
+    <div class="nav-tab" onclick="navTo('qr')">掃描 QR</div>
+  </div>
+
+  <!-- ══════════════════════════════════════════
+       畫面 S1：輸入銀行代碼與帳號
+  ══════════════════════════════════════════════ -->
+  <div class="screen active" id="screen-bank">
+
+    <!-- 步驟條：1 of 2 -->
+    <div class="step-bar">
+      <div class="step-item">
+        <div class="step-circle active">1</div>
+        <div class="step-label active">收款帳號</div>
+      </div>
+      <div class="step-line"></div>
+      <div class="step-item">
+        <div class="step-circle" id="step2circle">2</div>
+        <div class="step-label" id="step2label">轉帳金額</div>
+      </div>
+    </div>
+
+    <div class="form-section">
+      <div class="form-title">收款方資訊</div>
+      <div class="form-sub">請輸入收款方的銀行代碼與帳號，系統將自動驗證。</div>
+
+      <!-- 銀行代碼（預設 3 位，佔位符 000） -->
+      <div class="field-block">
+        <div class="field-label-row">
+          <span class="field-label">銀行代碼</span>
+          <span class="field-meta">3 位數字</span>
+        </div>
+        <div class="digit-input-wrap" onclick="document.getElementById('bankCodeInput').focus()">
+          <span class="digit-display" id="bankCodeDisplay"><span class="dp">0</span><span class="dp">0</span><span class="dp">0</span></span>
+          <input
+            id="bankCodeInput"
+            class="digit-real-hidden"
+            type="text"
+            inputmode="numeric"
+            maxlength="7"
+            autocomplete="off"
+            oninput="onBankCodeInput(this)"
+          />
+        </div>
+        <div class="field-hint">例：004 = 台灣銀行，013 = 國泰世華，822 = 中信銀行</div>
+        <div class="field-error" id="bankCodeError"></div>
+      </div>
+
+      <!-- 銀行帳號（預設 16 位，佔位符 0000000000000000） -->
+      <div class="field-block">
+        <div class="field-label-row">
+          <span class="field-label">銀行帳號</span>
+          <span class="field-meta">最多 16 位數字</span>
+        </div>
+        <div class="digit-input-wrap" onclick="document.getElementById('bankAcctInput').focus()">
+          <span class="digit-display" id="bankAcctDisplay"><span class="dp">0</span><span class="dp">0</span><span class="dp">0</span><span class="dp">0</span><span class="dp">0</span><span class="dp">0</span><span class="dp">0</span><span class="dp">0</span><span class="dp">0</span><span class="dp">0</span><span class="dp">0</span><span class="dp">0</span><span class="dp">0</span><span class="dp">0</span><span class="dp">0</span><span class="dp">0</span></span>
+          <input
+            id="bankAcctInput"
+            class="digit-real-hidden"
+            type="text"
+            inputmode="numeric"
+            maxlength="16"
+            autocomplete="off"
+            oninput="onBankAcctInput(this)"
+          />
+        </div>
+        <div class="field-hint">請輸入 10～16 位數字帳號（不含空格或連字號）</div>
+        <div class="field-error" id="bankAcctError"></div>
+      </div>
+    </div>
+
+    <button class="primary-btn" id="nextToAmountBtn" onclick="goToAmount()" disabled>
+      下一步：輸入金額 →
+    </button>
+  </div>
+
+  <!-- ══════════════════════════════════════════
+       畫面 S2：輸入金額（含緩衝覆蓋層）
+  ══════════════════════════════════════════════ -->
+  <div class="screen" id="screen-amount">
+
+    <!-- ── 轉帳輸入區（緩衝前顯示） ── -->
+    <div id="transferContent">
+
+      <!-- 步驟條：2 of 2 -->
+      <div class="step-bar">
+        <div class="step-item">
+          <div class="step-circle done">✓</div>
+          <div class="step-label done">收款帳號</div>
+        </div>
+        <div class="step-line done"></div>
+        <div class="step-item">
+          <div class="step-circle active">2</div>
+          <div class="step-label active">轉帳金額</div>
+        </div>
+      </div>
+
+      <div class="screen-header" style="padding-top:14px;">
+        <div class="back-btn" onclick="showScreen('bank')">←</div>
+        <div class="screen-title">輸入轉帳金額</div>
+      </div>
+
+      <!-- 收款人摘要 -->
+      <div class="recipient-summary">
+        <div class="rs-avatar">👤</div>
+        <div class="rs-info">
+          <div class="rs-name">收款方</div>
+          <div class="rs-acct" id="recipientAcctDisplay">—</div>
+        </div>
+      </div>
+
+      <!-- 金額輸入 -->
+      <div class="amount-hero">
+        <div class="amount-label-sm">轉帳金額（新台幣）</div>
+        <div class="amount-row">
+          <div class="currency-sign">$</div>
+          <input
+            id="amountInput"
+            class="amount-input"
+            type="text"
+            inputmode="decimal"
+            placeholder="0"
+            maxlength="13"
+            oninput="onAmountInput(this)"
+            onblur="onAmountBlur(this)"
+          />
+        </div>
+        <div class="amount-underline"></div>
+        <div class="amount-hint">例：輸入 2500 即為新台幣 $2,500</div>
+        <div class="amount-error" id="amountError"></div>
+        <div class="cooling-preview" id="coolingPreview"></div>
+      </div>
+
+      <div class="bsp-alert">
+        <div class="icon">📞</div>
+        <p><strong>偵測到通話中。</strong>系統正依據您的操作行為與金額自動計算緩衝時間，收款方在轉帳完成前不會收到通知。</p>
+      </div>
+
+      <button class="primary-btn" id="confirmTransferBtn" onclick="goToBuffer()" disabled>
+        確認轉帳
+      </button>
+      <button class="secondary-btn" onclick="goToExemptionFromTransfer()">
+        透過豁免路徑直接轉帳
+      </button>
+    </div>
+
+    <!-- ── 冷靜緩衝覆蓋層（確認後顯示） ── -->
+    <div class="buffer-overlay" id="bufferOverlay">
+
+      <div class="staged-badge">
+        <div class="staged-dot"></div>
+        暫存中 — 資金保留，尚未發送
+      </div>
+
+      <div class="cooling-reason-badge">
+        <span>⏱</span>
+        <span id="coolingReason">計算中…</span>
+      </div>
+
+      <div class="buffer-hero">
+        <div class="shield-ring">
+          <svg class="ring-svg" viewBox="0 0 120 120">
+            <circle class="ring-bg"       cx="60" cy="60" r="54"/>
+            <circle class="ring-progress" id="ringProgress" cx="60" cy="60" r="54"/>
+          </svg>
+          <div class="shield-inner">
+            <div class="shield-icon">🛡</div>
+            <div class="timer-text"  id="timerDisplay">--:--</div>
+            <div class="timer-label">剩餘時間</div>
+          </div>
+        </div>
+
+        <div class="buffer-title">您的資金安全暫存中</div>
+        <div class="buffer-subtitle">
+          收款方<strong style="color:var(--text)">尚未收到任何通知</strong>。
+        </div>
+        <div class="staged-amount-row">
+          <div style="font-size:13px;color:var(--muted);">暫存金額</div>
+          <div class="staged-amount-value" id="bufferAmountDisplay">—</div>
+        </div>
+      </div>
+
+      <div class="status-grid">
+        <div class="status-pill">
+          <div class="pill-icon">🔕</div>
+          <div class="pill-label">收款方通知</div>
+          <div class="pill-value">未通知</div>
+        </div>
+        <div class="status-pill">
+          <div class="pill-icon">💰</div>
+          <div class="pill-label">資金狀態</div>
+          <div class="pill-value">暫存中</div>
+        </div>
+        <div class="status-pill warn">
+          <div class="pill-icon">⏱</div>
+          <div class="pill-label">緩衝時長</div>
+          <div class="pill-value" id="bufferDurationPill">—</div>
+        </div>
+        <div class="status-pill warn">
+          <div class="pill-icon">🔄</div>
+          <div class="pill-label">BSP 模型</div>
+          <div class="pill-value" id="bspStatusPill">正常</div>
+        </div>
+      </div>
+
+      <div class="bsp-indicator">
+        <div class="bsp-top">
+          <span class="bsp-label-txt">BSP 行為壓力分數</span>
+          <span class="bsp-level-txt" id="bspLevelText">正常 · 22%</span>
+        </div>
+        <div class="bsp-bar-bg"><div class="bsp-bar-fill" id="bspBar"></div></div>
+        <div class="bsp-triggers">
+          <span class="bsp-tag" id="bspTag1">📞 通話中</span>
+          <span class="bsp-tag" id="bspTag2">⏸ 輕微猶豫</span>
+        </div>
+      </div>
+
+      <button class="withdraw-btn" onclick="showWithdraw()">
+        ← 取消並立即取回資金
+      </button>
+    </div>
+
+  </div><!-- /screen-amount -->
+
+  <!-- ══════════════════════════════════════════
+       畫面：豁免路徑
+  ══════════════════════════════════════════════ -->
+  <div class="screen" id="screen-exemption">
+    <div class="screen-header">
+      <div class="back-btn" id="exemptionBackBtn" onclick="showScreen('bank')">←</div>
+      <div class="screen-title">豁免路徑</div>
+    </div>
+
+    <div class="exemption-section">
+      <div class="section-label">透過可信管道跳過緩衝期</div>
+
+      <div class="exemption-option" id="wlOption" onclick="toggleWhitelistPanel()">
+        <div class="option-icon-wrap opt-green">👥</div>
+        <div class="option-text">
+          <h4>信任聯絡人（白名單）</h4>
+          <p>輸入收款方銀行代碼與帳號，完成地理位置驗證後即可直接轉帳。</p>
+        </div>
+        <div class="option-arrow" id="wlArrow">›</div>
+      </div>
+
+      <div class="whitelist-panel" id="whitelistPanel">
+        <div class="wl-field-group">
+          <label class="wl-field-label" for="wlBankCode">銀行代碼</label>
+          <input id="wlBankCode" class="wl-field-input" type="text" inputmode="numeric" placeholder="例：004（台灣銀行）" maxlength="7" oninput="this.value=this.value.replace(/\D/g,'')"/>
+          <div class="wl-field-hint">請輸入 3～7 位數字銀行代碼</div>
+        </div>
+        <div class="wl-field-group">
+          <label class="wl-field-label" for="wlBankAcct">銀行帳號</label>
+          <input id="wlBankAcct" class="wl-field-input" type="text" inputmode="numeric" placeholder="例：0123456789012" maxlength="16" oninput="this.value=this.value.replace(/\D/g,'')"/>
+          <div class="wl-field-hint">請輸入 10～16 位數字帳號</div>
+        </div>
+        <div class="panel-error" id="wlError"></div>
+        <button class="panel-submit-btn" onclick="submitWhitelist()">驗證並立即轉帳 →</button>
+      </div>
+
+      <div class="exemption-option" onclick="triggerExemption('utility')">
+        <div class="option-icon-wrap opt-blue">🏢</div>
+        <div class="option-text">
+          <h4>已驗證機構</h4>
+          <p>直接繳費給已驗證的公用事業、政府機關或持牌金融機構。</p>
+        </div>
+        <div class="option-arrow">›</div>
+      </div>
+
+      <div class="exemption-option" onclick="showScreen('qr')">
+        <div class="option-icon-wrap opt-orange">📱</div>
+        <div class="option-text">
+          <h4>現場動態 QR 碼</h4>
+          <p>掃描商家的動態旋轉 QR 碼，確認實際到場後立即跳過緩衝期。</p>
+        </div>
+        <div class="option-arrow">›</div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+    <div style="padding:16px 28px 0;">
+      <div style="background:rgba(0,229,160,0.06);border:1px solid rgba(0,229,160,0.15);border-radius:14px;padding:14px 16px;">
+        <div style="font-size:11px;color:var(--accent);font-weight:700;margin-bottom:6px;">為什麼設有豁免路徑？</div>
+        <div style="font-size:12px;color:var(--muted);line-height:1.7;">詐騙集團無法偽造實際到場、已驗證的 QR 碼，或已完成地理位置核查的信任帳戶。這些路徑僅在您的身份與位置皆獲確認後，方可繞過緩衝保護。</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════
+       畫面：QR 掃描
+  ══════════════════════════════════════════════ -->
+  <div class="screen" id="screen-qr">
+    <div class="screen-header">
+      <div class="back-btn" onclick="showScreen('exemption')">←</div>
+      <div class="screen-title">掃描商家 QR 碼</div>
+    </div>
+    <div class="qr-section">
+      <div class="qr-frame">
+        <div class="qr-corner tl"></div><div class="qr-corner tr"></div>
+        <div class="qr-corner bl"></div><div class="qr-corner br"></div>
+        <div class="scan-line"></div>
+        <div class="qr-icon">⬛</div>
+      </div>
+      <div style="font-size:16px;font-weight:900;">掃描動態 QR 碼</div>
+      <div class="qr-info">將鏡頭對準商家的動態旋轉 QR 碼。<br>確認實際到場後，緩衝期將立即解除。</div>
+      <button class="primary-btn" style="margin-top:20px;" onclick="triggerExemption('qr')">模擬 QR 驗證成功 ✓</button>
+      <button class="secondary-btn" onclick="showScreen('exemption')">取消</button>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════
+       畫面：取回資金確認
+  ══════════════════════════════════════════════ -->
+  <div class="screen" id="screen-withdraw">
+    <div class="screen-header">
+      <div class="back-btn" onclick="backToBuffer()">←</div>
+      <div class="screen-title">取回暫存資金</div>
+    </div>
+    <div class="withdraw-screen">
+      <div class="big-icon">💰</div>
+      <div class="confirm-title">立即取回資金</div>
+      <div class="confirm-sub">您的資金已暫存，完全由您掌控。可立即零手續費退回您的帳戶。</div>
+      <div class="amount-confirm">
+        <div class="label">暫存金額</div>
+        <div class="value" id="withdrawAmountDisplay">—</div>
+      </div>
+      <button class="danger-btn" onclick="triggerWithdraw()">立即取回 · 退回我的帳戶</button>
+      <button class="secondary-btn" style="margin:0;" onclick="backToBuffer()">繼續保留在緩衝期</button>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════
+       畫面：完成結果
+  ══════════════════════════════════════════════ -->
+  <div class="screen" id="screen-success">
+    <div class="withdraw-screen" style="padding-top:60px;">
+      <div class="big-icon success-anim" id="successIcon">✅</div>
+      <div class="confirm-title" id="successTitle">資金已退回</div>
+      <div class="confirm-sub"   id="successSub">已退回您的帳戶，本次未發生任何轉帳。</div>
+
+      <div style="margin-top:28px;background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:20px;text-align:left;">
+        <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:12px;">保護摘要</div>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <div class="row-between">
+            <span style="font-size:12px;color:var(--muted);">轉帳金額</span>
+            <span style="font-size:12px;font-weight:700;color:var(--text);" id="summaryAmount">—</span>
+          </div>
+          <div class="row-between">
+            <span style="font-size:12px;color:var(--muted);">收款方是否收到通知？</span>
+            <span style="font-size:12px;font-weight:700;color:var(--accent);">從未通知</span>
+          </div>
+          <div class="row-between">
+            <span style="font-size:12px;color:var(--muted);">BSP 最終分數</span>
+            <span style="font-size:12px;font-weight:700;color:var(--warn);" id="summaryBsp">—</span>
+          </div>
+          <div class="row-between">
+            <span style="font-size:12px;color:var(--muted);">最終結果</span>
+            <span style="font-size:12px;font-weight:700;color:var(--accent);" id="outcomeText">轉帳已取消</span>
+          </div>
+        </div>
+      </div>
+
+      <button class="primary-btn" style="margin-top:20px;" onclick="resetApp()">完成</button>
+    </div>
+  </div>
+
+</div><!-- /phone-shell -->
+
+<script>
+/* ════════════════════════════════════════════
+   全域狀態
+════════════════════════════════════════════ */
+let timerInterval     = null;
+let totalSeconds      = 0;
+let maxSeconds        = 5 * 60;
+let currentAmount     = 0;
+let bspLevel          = 22;
+let hesitationSeconds = 0;
+let hesitationTimer   = null;
+let bufferActive      = false;  // 是否已進入緩衝狀態
+
+/* ── 猶豫計時從載入起算 ── */
+function startHesitationTimer() {
+  if (hesitationTimer) return;
+  hesitationTimer = setInterval(() => { hesitationSeconds++; }, 1000);
+}
+function stopHesitationTimer() {
+  if (hesitationTimer) { clearInterval(hesitationTimer); hesitationTimer = null; }
+}
+startHesitationTimer();
+
+/* ════════════════════════════════════════════
+   銀行代碼輸入（字元格渲染）
+════════════════════════════════════════════ */
+function renderDigitDisplay(displayId, value, totalSlots) {
+  const el = document.getElementById(displayId);
+  if (!el) return;
+  let html = '';
+  for (let i = 0; i < Math.max(value.length, totalSlots); i++) {
+    if (i < value.length) {
+      html += '<span class="dc">' + value[i] + '</span>';
+    } else {
+      html += '<span class="dp">0</span>';
+    }
+  }
+  el.innerHTML = html;
+}
+
+function onBankCodeInput(el) {
+  el.value = el.value.replace(/\D/g, '');
+  renderDigitDisplay('bankCodeDisplay', el.value, 3);
+  validateBankFields();
+}
+
+function onBankAcctInput(el) {
+  el.value = el.value.replace(/\D/g, '');
+  renderDigitDisplay('bankAcctDisplay', el.value, 16);
+  validateBankFields();
+}
+
+function validateBankFields() {
+  const code = document.getElementById('bankCodeInput').value.trim();
+  const acct = document.getElementById('bankAcctInput').value.trim();
+  const btn  = document.getElementById('nextToAmountBtn');
+  const codeOk = /^\d{3,7}$/.test(code);
+  const acctOk = /^\d{10,16}$/.test(acct);
+  btn.disabled = !(codeOk && acctOk);
+}
+
+/* ════════════════════════════════════════════
+   前往金額頁
+════════════════════════════════════════════ */
+function goToAmount() {
+  const code = document.getElementById('bankCodeInput').value.trim();
+  const acct = document.getElementById('bankAcctInput').value.trim();
+  // 在收款人摘要顯示帳號資訊
+  const display = '銀行 ' + code + '　帳號末4碼 ****' + acct.slice(-4);
+  document.getElementById('recipientAcctDisplay').textContent = display;
+  showScreen('amount');
+}
+
+/* ════════════════════════════════════════════
+   金額輸入
+════════════════════════════════════════════ */
+function onAmountInput(el) {
+  let raw = el.value.replace(/[^\d.]/g, '');
+  const parts = raw.split('.');
+  if (parts.length > 2) raw = parts[0] + '.' + parts.slice(1).join('');
+  if (parts[1] && parts[1].length > 2) raw = parts[0] + '.' + parts[1].slice(0, 2);
+  const numVal = parseFloat(raw.replace(/,/g, ''));
+  currentAmount = isNaN(numVal) ? 0 : numVal;
+  el.value = raw.includes('.')
+    ? (raw.split('.')[0] === '' ? '' : addCommas(raw.split('.')[0])) + '.' + raw.split('.')[1]
+    : (raw === '' ? '' : addCommas(raw));
+  validateAmount();
+  updateCoolingPreview();
+}
+function onAmountBlur(el) {
+  if (currentAmount > 0) el.value = currentAmount.toLocaleString('zh-TW', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  validateAmount();
+  updateCoolingPreview();
+}
+function addCommas(s) { return s.replace(/,/g,'').replace(/\B(?=(\d{3})+(?!\d))/g,','); }
+function fmtAmt(n)    { return '$' + n.toLocaleString('zh-TW', { minimumFractionDigits: 0, maximumFractionDigits: 2 }); }
+
+function validateAmount() {
+  const errEl = document.getElementById('amountError');
+  const btn   = document.getElementById('confirmTransferBtn');
+  if (currentAmount <= 0)        { errEl.textContent = ''; btn.disabled = true; }
+  else if (currentAmount < 1)    { errEl.textContent = '⚠ 金額不得低於 $1'; btn.disabled = true; }
+  else if (currentAmount > 500000){ errEl.textContent = '⚠ 單筆上限為 $500,000，請拆分轉帳'; btn.disabled = true; }
+  else                           { errEl.textContent = ''; btn.disabled = false; }
+}
+
+/* ════════════════════════════════════════════
+   冷靜緩衝期計算
+   規則 A（猶豫時間）  規則 B（金額）  取較大值
+════════════════════════════════════════════ */
+function calcCoolingMinutes(hesitSec, amount) {
+  const mH = hesitSec < 20 ? 5 : hesitSec <= 60 ? 10 : 15;
+  const mA = amount < 20000 ? 5 : amount <= 50000 ? 10 : 15;
+  return Math.max(mH, mA);
+}
+function getCoolingReason(hesitSec, amount) {
+  const mH = hesitSec < 20 ? 5 : hesitSec <= 60 ? 10 : 15;
+  const mA = amount < 20000 ? 5 : amount <= 50000 ? 10 : 15;
+  if (mH >= mA) {
+    const lbl = hesitSec < 20 ? '< 20 秒' : hesitSec <= 60 ? '20–60 秒' : '> 60 秒';
+    return '依猶豫時間（' + lbl + '）→ ' + mH + ' 分鐘';
+  } else {
+    const lbl = amount < 20000 ? '< $20,000' : amount <= 50000 ? '$20,000–$50,000' : '> $50,000';
+    return '依轉帳金額（' + lbl + '）→ ' + mA + ' 分鐘';
+  }
+}
+
+function updateCoolingPreview() {
+  const el = document.getElementById('coolingPreview');
+  if (!el || currentAmount <= 0) { if(el) el.textContent=''; return; }
+  const mins = calcCoolingMinutes(hesitationSeconds, currentAmount);
+  el.textContent = '預計緩衝時間：' + mins + ' 分鐘';
+  el.style.color = mins === 5 ? 'var(--accent)' : mins === 10 ? '#c8a020' : 'var(--warn)';
+}
+
+/* ════════════════════════════════════════════
+   進入緩衝狀態（覆蓋金額頁、不換頁）
+════════════════════════════════════════════ */
+function goToBuffer() {
+  if (currentAmount <= 0) return;
+  stopHesitationTimer();
+
+  const mins   = calcCoolingMinutes(hesitationSeconds, currentAmount);
+  const reason = getCoolingReason(hesitationSeconds, currentAmount);
+  maxSeconds   = mins * 60;
+  totalSeconds = maxSeconds;
+
+  const fmt = fmtAmt(currentAmount);
+  document.getElementById('bufferAmountDisplay').textContent   = fmt;
+  document.getElementById('withdrawAmountDisplay').textContent = fmt;
+  document.getElementById('coolingReason').textContent         = reason;
+  document.getElementById('bufferDurationPill').textContent    = mins + ' 分鐘';
+
+  // 隱藏轉帳表單，顯示緩衝覆蓋層（仍在同一畫面）
+  document.getElementById('transferContent').style.display = 'none';
+  document.getElementById('bufferOverlay').classList.add('active');
+  bufferActive = true;
+
+  updateTimerDisplay();
+  startCountdown();
+  // 更新頂部導覽（轉帳標籤保持 active）
+  document.querySelectorAll('.nav-tab')[0].classList.add('active');
+}
+
+function backToBuffer() {
+  showScreen('amount');
+  // 確保覆蓋層狀態正確
+  if (bufferActive) {
+    document.getElementById('transferContent').style.display = 'none';
+    document.getElementById('bufferOverlay').classList.add('active');
+  }
+}
+
+function showWithdraw() {
+  stopCountdown();
+  showScreen('withdraw');
+}
+
+/* ════════════════════════════════════════════
+   畫面切換
+════════════════════════════════════════════ */
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  const sc = document.getElementById('screen-' + id);
+  if (sc) sc.classList.add('active');
+  // 標籤對應
+  const tabMap = { bank: 0, amount: 0, exemption: 1, qr: 1 };
+  const tabs = document.querySelectorAll('.nav-tab');
+  if (tabMap[id] !== undefined) tabs[tabMap[id]]?.classList.add('active');
+  // 倒數只在 amount 且緩衝中才繼續
+  if (id !== 'amount' || !bufferActive) stopCountdown();
+  if (id === 'amount' && bufferActive) startCountdown();
+  // 回到銀行頁重啟猶豫計時
+  if (id === 'bank') startHesitationTimer();
+}
+
+/* navTo：頂部 tab 點擊 */
+function navTo(id) {
+  // 若緩衝中，tab 點轉帳直接跳回 amount（緩衝狀態）
+  if (id === 'bank' && bufferActive) { showScreen('amount'); return; }
+  showScreen(id);
+}
+
+/* ════════════════════════════════════════════
+   倒數計時器
+════════════════════════════════════════════ */
+function startCountdown() {
+  if (timerInterval) return;
+  timerInterval = setInterval(() => {
+    if (totalSeconds > 0) { totalSeconds--; updateTimerDisplay(); }
+    else { clearInterval(timerInterval); timerInterval = null; }
+  }, 1000);
+}
+function stopCountdown() {
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+}
+function updateTimerDisplay() {
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  const el = document.getElementById('timerDisplay');
+  if (el) el.textContent = String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+  const progress = maxSeconds > 0 ? totalSeconds / maxSeconds : 1;
+  const ring = document.getElementById('ringProgress');
+  if (ring) {
+    ring.style.strokeDashoffset = 345 * (1 - progress);
+    ring.style.stroke = progress > 0.5 ? 'var(--accent)' : progress > 0.25 ? 'var(--warn)' : '#ff4444';
+  }
+}
+
+/* ════════════════════════════════════════════
+   白名單面板
+════════════════════════════════════════════ */
+function toggleWhitelistPanel() {
+  const panel = document.getElementById('whitelistPanel');
+  const arrow = document.getElementById('wlArrow');
+  const open  = panel.classList.toggle('open');
+  arrow.textContent = open ? '∨' : '›';
+  document.getElementById('wlError').textContent = '';
+}
+function submitWhitelist() {
+  const code = document.getElementById('wlBankCode').value.trim();
+  const acct = document.getElementById('wlBankAcct').value.trim();
+  const err  = document.getElementById('wlError');
+  if (!/^\d{3,7}$/.test(code))   { err.textContent = '⚠ 銀行代碼須為 3～7 位數字'; return; }
+  if (!/^\d{10,16}$/.test(acct)) { err.textContent = '⚠ 帳號須為 10～16 位數字'; return; }
+  err.textContent = '';
+  triggerExemption('whitelist');
+}
+
+/* ════════════════════════════════════════════
+   豁免路徑觸發
+════════════════════════════════════════════ */
+function triggerExemption(type) {
+  stopCountdown(); stopHesitationTimer();
+  const amtStr = currentAmount > 0 ? fmtAmt(currentAmount) : '指定金額';
+  const msgs = {
+    whitelist: { icon:'👥', title:'信任聯絡人驗證成功', sub:'地理位置已確認，'+amtStr+' 已立即發送，緩衝期已繞過。', outcome:'豁免（白名單）' },
+    utility:   { icon:'🏢', title:'機構驗證成功',         sub:amtStr+' 已直接轉帳至已驗證機構，無需緩衝期。', outcome:'豁免（驗證機構）' },
+    qr:        { icon:'📱', title:'QR 驗證成功 · 現場確認', sub:'動態 QR 碼確認實際到場，'+amtStr+' 已立即轉帳至商家。', outcome:'豁免（QR 掃描）' }
+  };
+  const msg = msgs[type] || msgs.whitelist;
+  const icon = document.getElementById('successIcon');
+  icon.textContent = msg.icon;
+  icon.classList.remove('success-anim'); void icon.offsetWidth; icon.classList.add('success-anim');
+  document.getElementById('successTitle').textContent  = msg.title;
+  document.getElementById('successSub').textContent    = msg.sub;
+  document.getElementById('outcomeText').textContent   = msg.outcome;
+  document.getElementById('summaryAmount').textContent = amtStr;
+  document.getElementById('summaryBsp').textContent    = getBspLabel();
+  showScreen('success');
+}
+
+/* ════════════════════════════════════════════
+   取回資金
+════════════════════════════════════════════ */
+function triggerWithdraw() {
+  stopCountdown(); stopHesitationTimer();
+  const amtStr = currentAmount > 0 ? fmtAmt(currentAmount) : '已暫存金額';
+  const icon = document.getElementById('successIcon');
+  icon.textContent = '💸';
+  icon.classList.remove('success-anim'); void icon.offsetWidth; icon.classList.add('success-anim');
+  document.getElementById('successTitle').textContent  = '資金已退回';
+  document.getElementById('successSub').textContent    = amtStr + ' 已立即退回您的帳戶。收款方從未收到任何通知。';
+  document.getElementById('outcomeText').textContent   = '轉帳已取消';
+  document.getElementById('summaryAmount').textContent = amtStr;
+  document.getElementById('summaryBsp').textContent    = getBspLabel();
+  showScreen('success');
+}
+
+/* ════════════════════════════════════════════
+   從轉帳頁進入豁免路徑
+════════════════════════════════════════════ */
+function goToExemptionFromTransfer() {
+  document.getElementById('exemptionBackBtn').onclick = () => showScreen('amount');
+  if (currentAmount > 0) {
+    document.getElementById('bufferAmountDisplay').textContent   = fmtAmt(currentAmount);
+    document.getElementById('withdrawAmountDisplay').textContent = fmtAmt(currentAmount);
+  }
+  showScreen('exemption');
+}
+
+/* ════════════════════════════════════════════
+   重置
+════════════════════════════════════════════ */
+function resetApp() {
+  stopCountdown(); stopHesitationTimer();
+  totalSeconds = 0; maxSeconds = 5*60; bspLevel = 22;
+  currentAmount = 0; hesitationSeconds = 0; bufferActive = false;
+
+  updateTimerDisplay(); updateBspDisplay();
+
+  // 重置銀行頁
+  const bci = document.getElementById('bankCodeInput');
+  const bai = document.getElementById('bankAcctInput');
+  if (bci) { bci.value = ''; renderDigitDisplay('bankCodeDisplay', '', 3); }
+  if (bai) { bai.value = ''; renderDigitDisplay('bankAcctDisplay', '', 16); }
+  document.getElementById('bankCodeError') && (document.getElementById('bankCodeError').textContent = '');
+  document.getElementById('bankAcctError') && (document.getElementById('bankAcctError').textContent = '');
+  document.getElementById('nextToAmountBtn').disabled = true;
+
+  // 重置金額頁
+  document.getElementById('amountInput').value    = '';
+  document.getElementById('amountError').textContent    = '';
+  document.getElementById('coolingPreview').textContent = '';
+  document.getElementById('confirmTransferBtn').disabled = true;
+
+  // 重置覆蓋層
+  document.getElementById('transferContent').style.display = '';
+  document.getElementById('bufferOverlay').classList.remove('active');
+
+  // 重置豁免
+  document.getElementById('wlBankCode').value = '';
+  document.getElementById('wlBankAcct').value = '';
+  document.getElementById('wlError').textContent  = '';
+  document.getElementById('whitelistPanel').classList.remove('open');
+  document.getElementById('wlArrow').textContent  = '›';
+
+  showScreen('bank');
+  document.querySelectorAll('.nav-tab')[0].classList.add('active');
+  startHesitationTimer();
+}
+
+/* ════════════════════════════════════════════
+   BSP 分數
+════════════════════════════════════════════ */
+function getBspLabel()      { const v=Math.round(bspLevel); return bspLevel<30?'正常 · '+v+'%':bspLevel<46?'輕度異常 · '+v+'%':bspLevel<61?'中度異常 · '+v+'%':'偏高 · '+v+'%'; }
+function getBspColor()      { return bspLevel<30?'var(--accent)':bspLevel<46?'#c8a020':bspLevel<61?'var(--warn)':'var(--accent2)'; }
+function getBspBarGrad()    { return bspLevel<30?'linear-gradient(90deg,var(--accent),var(--staged))':bspLevel<46?'linear-gradient(90deg,var(--accent),#c8a020)':'linear-gradient(90deg,var(--accent),var(--warn))'; }
+function getBspPillText()   { return bspLevel<30?'正常':bspLevel<46?'輕度異常':bspLevel<61?'中度異常':'偏高'; }
+
+function updateBspDisplay() {
+  const bar=document.getElementById('bspBar'), lvl=document.getElementById('bspLevelText'), pill=document.getElementById('bspStatusPill');
+  if (!bar) return;
+  const c = getBspColor();
+  bar.style.width = bspLevel.toFixed(1)+'%';
+  bar.style.background = getBspBarGrad();
+  if (lvl)  { lvl.textContent = getBspLabel();    lvl.style.color = c; }
+  if (pill) { pill.textContent = getBspPillText(); pill.style.color = c; }
+  ['bspTag1','bspTag2'].forEach(id => {
+    const t=document.getElementById(id); if(!t) return;
+    bspLevel>=46 ? t.classList.add('elevated') : t.classList.remove('elevated');
+  });
+}
+updateBspDisplay();
+
+const BSP_BASELINE=25, BSP_MAX=58;
+setInterval(() => {
+  let d = (Math.random()*2.0)-1.0;
+  d -= (bspLevel-BSP_BASELINE)*0.10;
+  if (Math.random()<0.04) {
+    d += 10+Math.random()*8;
+    const t2=document.getElementById('bspTag2');
+    if(t2){ t2.textContent='🔄 切換應用程式'; t2.classList.add('elevated'); setTimeout(()=>{ if(t2) t2.textContent='⏸ 輕微猶豫'; },5000); }
+  }
+  bspLevel = Math.max(15, Math.min(BSP_MAX, bspLevel+d));
+  updateBspDisplay();
+}, 3000);
+</script>
+</body>
+</html>
